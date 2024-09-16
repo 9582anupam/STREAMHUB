@@ -6,12 +6,12 @@ const generateAccessAndRefreshToken = async (userId) => {
     try {
         const user = await User.findById(userId);
         const accessToken = await user.generateAccessToken();
-        const refreshToken = await user.generateRefreshToken();
+        const newRefreshToken = await user.generateRefreshToken();
 
         // Save the refresh token in the database
-        user.refreshToken = refreshToken;
+        user.refreshToken = newRefreshToken;
         await user.save({ validateBeforeSave: false });
-        return { accessToken, refreshToken };
+        return { accessToken, newRefreshToken };
     } catch (error) {
         console.error("Error generating access and refresh tokens:", error);
         throw new Error("Internal server error");
@@ -24,7 +24,11 @@ const registerUser = async (req, res) => {
         const { username, email, fullName, password } = req.body;
 
         // Validate that all required fields are provided
-        if (![username, email, fullName, password].every(field => field?.trim())) {
+        if (
+            ![username, email, fullName, password].every((field) =>
+                field?.trim()
+            )
+        ) {
             return res.status(400).json({ message: "All fields are required" });
         }
 
@@ -46,7 +50,8 @@ const registerUser = async (req, res) => {
 
         // Upload avatar to Cloudinary
         const avatarUploadResult = await uploadToCloudinary(avatarLocalPath);
-        if (!avatarUploadResult) {
+        const avatarUrl = avatarUploadResult?.url;
+        if (!avatarUrl) {
             return res.status(500).json({ message: "Error uploading avatar" });
         }
 
@@ -54,9 +59,11 @@ const registerUser = async (req, res) => {
         let coverImageUrl = "";
         if (req.files && req.files["coverImage"]) {
             const coverImageLocalPath = req.files["coverImage"][0].path;
-            const coverImageUploadResult = await uploadToCloudinary(coverImageLocalPath);
+            const coverImageUploadResult = await uploadToCloudinary(
+                coverImageLocalPath
+            );
             if (coverImageUploadResult) {
-                coverImageUrl = coverImageUploadResult;
+                coverImageUrl = coverImageUploadResult.url;
             }
         }
 
@@ -66,12 +73,14 @@ const registerUser = async (req, res) => {
             email,
             fullName,
             password,
-            avatar: avatarUploadResult,
+            avatar: avatarUrl,
             coverImage: coverImageUrl,
         });
 
         // Retrieve the created user without sensitive information
-        const createdUser = await User.findById(newUser._id).select("-password -refreshToken");
+        const createdUser = await User.findById(newUser._id).select(
+            "-password -refreshToken"
+        );
 
         if (!createdUser) {
             return res.status(500).json({ message: "Error creating user" });
@@ -79,9 +88,8 @@ const registerUser = async (req, res) => {
 
         return res.status(201).json({
             user: createdUser,
-            message: "User created successfully"
+            message: "User created successfully",
         });
-
     } catch (error) {
         console.error("Error during user registration:", error);
         return res.status(500).json({ message: "Internal server error" });
@@ -89,56 +97,62 @@ const registerUser = async (req, res) => {
 };
 
 const loginUser = async (req, res) => {
-    const { email, username, password } = req.body;
-    if (!email && !username) {
-        return res
-            .status(400)
-            .json({ message: "Email or username is required" });
-    }
+    try {
+        const { email, username, password } = req.body;
+        if (!email && !username) {
+            return res
+                .status(400)
+                .json({ message: "Email or username is required" });
+        }
 
-    const user = await User.findOne({
-        $or: [{ email }, { username }],
-    });
-
-    if (!user) {
-        return res.status(404).json({ message: "User does not exist" });
-    }
-
-    const isPasswordCorrect = await user.isPasswordCorrect(password);
-
-    if (!isPasswordCorrect) {
-        return res.status(401).json({ message: "Invalid credentials" });
-    }
-
-    // Generate access token and refresh token
-    const { accessToken, refreshToken } = await generateAccessAndRefreshToken(
-        user._id
-    );
-
-    // previous user var does not have accesstoken.
-    // To address this either make a db call again as while calling generateAccessAndRefreshToken adds the accesstoken
-    // or we can manually add it to the user var.
-    // choose according to the need, here db call is not very expensive so we are going with it.
-    const loggedInUser = await User.findById(user._id).select("-password -refreshToken");
-        // .findById(User._id)
-        // .select("-password -refreshToken");
-
-    // sending accessToken and refreshToken as cookies
-    const option = {
-        httpOnly: true,
-        secure: true,
-    };
-
-    return res
-        .status(200)
-        .cookie("accessToken", accessToken, option)
-        .cookie("refreshToken", refreshToken, option)
-        .json({
-            statusCode: 200,
-            data: loggedInUser, accessToken, refreshToken,
-            message: "User logged in successfully",
-            success: true
+        const user = await User.findOne({
+            $or: [{ email }, { username }],
         });
+
+        if (!user) {
+            return res.status(404).json({ message: "User does not exist" });
+        }
+
+        const isPasswordCorrect = await user.isPasswordCorrect(password);
+
+        if (!isPasswordCorrect) {
+            return res.status(401).json({ message: "Invalid credentials" });
+        }
+
+        // Generate access token and refresh token
+        const { accessToken, newRefreshToken } =
+            await generateAccessAndRefreshToken(user._id);
+
+        // previous user var does not have accesstoken.
+        // To address this either make a db call again as while calling generateAccessAndRefreshToken adds the accesstoken
+        // or we can manually add it to the user var.
+        // choose according to the need, here db call is not very expensive so we are going with it.
+        const loggedInUser = await User.findById(user._id).select(
+            "-password -refreshToken"
+        );
+
+        // sending accessToken and refreshToken as cookies
+        const option = {
+            httpOnly: true,
+            secure: true,
+        };
+
+        return res
+            .status(200)
+            .cookie("accessToken", accessToken, option)
+            .cookie("refreshToken", newRefreshToken, option)
+            .json({
+                statusCode: 200,
+                data: loggedInUser,
+                accessToken,
+                newRefreshToken,
+                message: "User logged in successfully",
+                success: true,
+            });
+    } catch (error) {
+        console.error("Error during user login:", error);
+        return res.status(500).json({ message: "Internal server error" });
+    }
 };
 
 const logoutUser = async (req, res) => {
@@ -149,7 +163,7 @@ const logoutUser = async (req, res) => {
             {
                 $set: {
                     refreshToken: undefined,
-                }
+                },
             },
             {
                 new: true,
@@ -161,15 +175,14 @@ const logoutUser = async (req, res) => {
             secure: true,
         };
         return res
-        .status(200)
-        .clearCookie("accessToken", options)
-        .clearCookie("refreshToken", options)
-        .json({
-            statusCode: 200,
-            message: "User logged out successfully",
-            success: true
-        });
-        
+            .status(200)
+            .clearCookie("accessToken", options)
+            .clearCookie("refreshToken", options)
+            .json({
+                statusCode: 200,
+                message: "User logged out successfully",
+                success: true,
+            });
     } catch (error) {
         console.error("Error during user logout:", error);
         return res.status(500).json({ message: "Internal server error" });
@@ -177,34 +190,48 @@ const logoutUser = async (req, res) => {
 };
 
 const refreshAccessToken = async (req, res) => {
-    
     try {
-        
-        const incomingRefreshToken = req.cookies?.refreshToken || req.body?.refreshToken;
-        
+        const incomingRefreshToken =
+            req.cookies?.refreshToken || req.body?.refreshToken;
+
         if (!incomingRefreshToken) {
-            return res.status(401).json({ message: "Unauthorized request: Refresh token is required" });
+            return res.status(401).json({
+                message: "Unauthorized request: Refresh token is required",
+            });
         }
 
-        const decoded = jwt.verify(incomingRefreshToken, process.env.REFRESH_TOKEN_SECRET);
+        const decoded = jwt.verify(
+            incomingRefreshToken,
+            process.env.REFRESH_TOKEN_SECRET
+        );
 
-        const user = User.findById(decoded?._id);
+        const user = await User.findById(decoded?._id);
 
         if (!user) {
-            return res.status(401).json({ message: "Unauthorized request: Invalid refresh token" });
+            return res.status(401).json({
+                message: "Unauthorized request: Invalid refresh token",
+            });
         }
 
         if (incomingRefreshToken !== user?.refreshToken) {
-            return res.status(401).json({ message: "Unauthorized request: Access token in invalid or expired" });
+            return (
+                res
+                    .status(401)
+                    // Generate new access token
+                    .json({
+                        message:
+                            "Unauthorized request: Access token in invalid or expired",
+                    })
+            );
         }
 
-        // Generate new access token
         const options = {
             httpOnly: true,
             secure: true,
         };
 
-        const { accessToken, newRefreshToken } = await generateAccessAndRefreshToken(user._id);
+        const { accessToken, newRefreshToken } =
+            await generateAccessAndRefreshToken(user._id);
 
         return res
             .status(200)
@@ -212,16 +239,200 @@ const refreshAccessToken = async (req, res) => {
             .cookie("refreshToken", newRefreshToken, options)
             .json({
                 statusCode: 200,
-                data: {accessToken: accessToken, refreshToken: newRefreshToken},
+                data: {
+                    accessToken: accessToken,
+                    refreshToken: newRefreshToken,
+                },
                 message: "Access token was updated successfully",
                 success: true,
             });
-
-
     } catch (error) {
         console.error("Error refreshing access token:", error);
         return res.status(500).json({ message: "Internal server error" });
     }
 };
 
-export { registerUser, loginUser, logoutUser, refreshAccessToken };
+const resetPassword = async (req, res) => {
+    try {
+        const { oldPassword, newPassword } = req.body;
+        const user = await User.findById(req.user._id);
+        const isPasswordCorrect = await user.isPasswordCorrect(oldPassword);
+
+        if (!isPasswordCorrect) {
+            return res.status(401).json({ message: "Invalid credentials" });
+        }
+
+        user.password = newPassword;
+        await user.save();
+        return res.status(200).json({
+            statusCode: 200,
+            data: {},
+            message: "Password reset successfully",
+            success: true,
+        });
+    } catch (error) {
+        console.error("Error reseting password:", error);
+        return res.status(500).json({ message: "Internal server error" });
+    }
+};
+
+const getCurrentUser = async (req, res) => {
+    try {
+        const user = req.user;
+        if (!user) {
+            return res.status(401).json({
+                statusCode: 401,
+                data: {},
+                message: "unauthorized user",
+                success: false,
+            });
+        }
+
+        return res.status(200).json({
+            statusCode: 200,
+            data: { user },
+            message: "user fetched successfully",
+            success: true,
+        });
+    } catch (error) {
+        console.error("Error fetching user:", error);
+        return res.status(500).json({ message: "Internal server error" });
+    }
+};
+
+const updateAccountDetails = async (req, res) => {
+    try {
+        const { fullName, email } = req?.body;
+        if (!fullName || !email) {
+            return res
+                .status(400)
+                .json({ message: "Full name and email are required" });
+        }
+
+        const user = await User.findByIdAndUpdate(
+            req.user?._id,
+            {
+                $set: {
+                    fullName,
+                    email,
+                },
+            },
+            {
+                new: true,
+            }
+        ).select("-password");
+
+        if (!user) {
+            return res.status(404).json({ message: "User not found" });
+        }
+
+        return res.status(200).json({
+            statusCode: 200,
+            data: { user },
+            message: "Account details updated successfully",
+            success: true,
+        });
+    } catch (error) {
+        console.error("Error updating account details:", error);
+        return res.status(500).json({ message: "Internal server error" });
+    }
+};
+
+const updateUserAvatar = async (req, res) => {
+    try {
+        const avatar = req.file?.path;
+
+        if (!avatar) {
+            return res.status(400).json({ message: "Avatar is required" });
+        }
+
+        const newAvatar = await uploadToCloudinary(avatar);
+
+        if (!newAvatar) {
+            return res
+                .status(400)
+                .json({ message: "Failed to upload avatar to cloudinary" });
+        }
+
+        const user = await User.findByIdAndUpdate(
+            req.user?._id,
+            {
+                $set: {
+                    avatar: newAvatar.url,
+                },
+            },
+            {
+                new: true,
+            }
+        ).select("-password");
+
+        if (!user) {
+            return res.status(404).json({ message: "User not found" });
+        }
+
+        return res.status(200).json({
+            statusCode: 200,
+            data: { user },
+            message: "Avatar updated successfully",
+            success: true,
+        });
+    } catch (error) {
+        console.error("Error updating user avatar:", error);
+        return res.status(500).json({ message: "Internal server error" });
+    }
+};
+
+const updateUserCoverImage = async (req, res) => {
+    try {
+        const coverImage = req.file?.path;
+        if (!coverImage) {
+            return res.status(400).json({ message: "Cover Image is required" });
+        }
+
+        const newcoverImage = await uploadToCloudinary(coverImage);
+
+        if (!newcoverImage?.url) {
+            return res.status(400).json({
+                message: "Failed to upload Cover Image to cloudinary",
+            });
+        }
+
+        const user = await User.findByIdAndUpdate(
+            req.user?._id,
+            {
+                $set: {
+                    coverImage: newcoverImage.url,
+                },
+            },
+            {
+                new: true,
+            }
+        ).select("-password");
+
+        if (!user) {
+            return res.status(404).json({ message: "User not found" });
+        }
+
+        return res.status(200).json({
+            statusCode: 200,
+            data: { user },
+            message: "Avatar updated successfully",
+            success: true,
+        });
+    } catch (error) {
+        console.error("Error updating user avatar:", error);
+        return res.status(500).json({ message: "Internal server error" });
+    }
+};
+
+export {
+    registerUser,
+    loginUser,
+    logoutUser,
+    refreshAccessToken,
+    resetPassword,
+    getCurrentUser,
+    updateAccountDetails,
+    updateUserAvatar,
+    updateUserCoverImage,
+};
